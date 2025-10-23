@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Super Core Meltdown</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  :root{--bg:#071018;--fg:#eaf8ff;--muted:#8aa3b0;--accent:#ff7b6b}
+  html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,Segoe UI,Roboto,Arial}
+  #wrap{display:flex;gap:12px;padding:12px}
+  canvas{background:linear-gradient(180deg,#05121a 0%, #081726 100%);border-radius:8px;box-shadow:0 8px 28px rgba(0,0,0,.7)}
+  #ui{width:320px}
+  .panel{background:rgba(255,255,255,0.02);padding:12px;border-radius:8px;margin-bottom:12px}
+  .bar{height:12px;background:rgba(255,255,255,0.04);border-radius:8px;overflow:hidden}
+  .bar > i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),#ffb57b)}
+  .muted{color:var(--muted);font-size:13px}
+  button{padding:8px 12px;border-radius:8px;background:#0a2b36;border:1px solid rgba(255,255,255,0.03);color:var(--fg);cursor:pointer}
+  .kbd{display:inline-block;padding:4px 8px;border-radius:6px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.03);font-family:monospace}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="c" width="980" height="540"></canvas>
+  <div id="ui">
+    <div class="panel">
+      <h3>Super Core Meltdown</h3>
+      <div class="muted" id="roundInfo">Meltdown Demo</div>
+      <div style="height:8px"></div>
+      <div class="muted">Player Health</div>
+      <div class="bar" style="margin-top:6px"><i id="playerHP" style="width:100%"></i></div>
+      <div style="height:8px"></div>
+      <div class="muted">Boss Health</div>
+      <div class="bar" style="margin-top:6px"><i id="bossHP" style="width:100%"></i></div>
+    </div>
+
+    <div class="panel">
+      <div class="muted">Controls</div>
+      <div style="height:8px"></div>
+      <div class="muted">Move: Arrow keys or WASD</div>
+      <div class="muted">Shoot / Attack: Space</div>
+      <div class="muted">Switch Weapon: <span class="kbd">A</span></div>
+      <div style="height:8px"></div>
+      <button id="restart">Restart</button>
+    </div>
+
+    <div class="panel">
+      <div class="muted">Notes</div>
+      <ul class="muted">
+        <li>Core charges a massive explosion every 5.25s; avoid the telegraph circle</li>
+        <li>Core fires exploding bullets that spawn shrapnel when destroyed or when lifetime ends</li>
+        <li>Sword clears nearby shrapnel but cannot stop the core explosion</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<script>
+/* Super Core Meltdown demo */
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+let keys = {};
+addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
+addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+
+function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+function rand(min,max){ return Math.random()*(max-min)+min; }
+function dist(ax,ay,bx,by){ return Math.hypot(ax-bx,ay-by); }
+function angleBetween(a,b){ return Math.atan2(b.y-a.y, b.x-a.x); }
+
+let player, boss, bullets, lastTime, shootTimer;
+bullets = [];
+
+/* Player */
+function createPlayer(){
+  return {
+    x: W/2, y: H - 90, r: 12,
+    speed: 280, hp: 130, maxHp:130,
+    weapon: 'gun', shootCooldown: 0.12, swordCooldown:0, swordActiveUntil:0, swordSwingTime:0.22, _aLock:false
+  };
+}
+
+/* bullet helper */
+function spawnBullet(x,y,vx,vy, owner='enemy', opts={}){
+  bullets.push(Object.assign({x,y,vx,vy,r:opts.r||5,owner,dmg:opts.dmg||10,life:opts.life||5}, opts));
+}
+
+/* Boss: Super Core Meltdown */
+const SuperCore = {
+  name: "Super Core Meltdown",
+  maxHp: 1600,
+  enter(self){
+    self.hp = self.maxHp;
+    self.x = W/2; self.y = 160;
+    self.timer = 0;
+    self.explodeCooldown = 5.25;   // core will detonate after this countdown
+    self.explodeTimer = self.explodeCooldown;
+    self.warningTime = 1.2;        // telegraph appears this long before explosion
+    self.exploding = false;
+    self.explosionRadius = 180;
+    self.explosionDamage = 70;
+    self.fireTimer = 0.9;          // rate for exploding bullets
+    self.shrapnelCount = 8;        // count when exploding bullet dies
+    self.burstOnDeath = true;      // exploding bullets spawn shrapnel when removed
+  },
+
+  update(self, dt){
+    self.timer += dt;
+    // countdown to meltdown explosion
+    self.explodeTimer -= dt;
+
+    // fire exploding bullets periodically
+    self.fireTimer -= dt;
+    if (self.fireTimer <= 0){
+      self.fireTimer = 0.8 + Math.random()*0.6;
+      // spawn an exploding projectile that moves moderately and spawns shrapnel on death
+      const ang = Math.atan2(player.y - self.y, player.x - self.x) + rand(-0.18,0.18);
+      spawnBullet(self.x + Math.cos(ang)*28, self.y + Math.sin(ang)*28, Math.cos(ang)*220, Math.sin(ang)*220, 'enemy',
+        { r:10, dmg:18, life:4.0, exploding:true, shrapnel: self.shrapnelCount });
+    }
+
+    // when explodeTimer <= warningTime, show telegraph; when <=0, explode
+    if (self.explodeTimer <= 0){
+      // detonate
+      self.exploding = true;
+      // perform explosion effect: spawn radial shrapnel and damage player if inside
+      // spawn many shards outward
+      for (let i=0;i<20;i++){
+        const a = i*(Math.PI*2/20) + rand(-0.12,0.12);
+        spawnBullet(self.x + Math.cos(a)*20, self.y + Math.sin(a)*20, Math.cos(a)*260 + rand(-40,40), Math.sin(a)*260 + rand(-40,40), 'enemy', { r:6, dmg:22, life:3.2 });
+      }
+      // damage player if inside radius
+      const d = dist(player.x, player.y, self.x, self.y);
+      if (d <= self.explosionRadius){
+        player.hp -= self.explosionDamage;
+        if (player.hp < 0) player.hp = 0;
+      }
+      // reset timer for next meltdown (could vary)
+      self.explodeTimer = 5.25 + 0.5*Math.random();
+      self.exploding = false;
+    }
+  },
+
+  draw(self, ctx){
+    // core body with pulsing glow as it nears explosion
+    const t = Math.max(0, Math.min(1, 1 - (self.explodeTimer / self.explodeCooldown)));
+    const glow = 8 + Math.sin(performance.now()/220)*2 + t*36;
+    ctx.save(); ctx.translate(self.x, self.y);
+    ctx.fillStyle = `rgba(${200 + 55*t|0},${120 + 80*t|0},${80 + 30*t|0},1)`;
+    ctx.beginPath(); ctx.arc(0,0,56 + Math.sin(performance.now()/300)*2 + t*10,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#08121c'; ctx.font = '12px system-ui'; ctx.fillText('Super Core Meltdown', -56, 74);
+    ctx.restore();
+
+    // explosion telegraph ring
+    if (self.explodeTimer <= self.warningTime){
+      const warnT = Math.max(0, Math.min(1, (self.warningTime - self.explodeTimer)/self.warningTime));
+      const alpha = 0.9 * warnT;
+      const radius = self.explosionRadius * (0.9 + 0.15*warnT);
+      ctx.strokeStyle = `rgba(255,120,80,${alpha})`;
+      ctx.lineWidth = 6 * warnT;
+      ctx.beginPath(); ctx.arc(self.x, self.y, radius, 0, Math.PI*2); ctx.stroke();
+      // pulsing fill
+      ctx.fillStyle = `rgba(255,80,30,${0.06*warnT})`;
+      ctx.beginPath(); ctx.arc(self.x, self.y, radius, 0, Math.PI*2); ctx.fill();
+    }
+  },
+
+  onHit(self, dmg){
+    self.hp -= dmg;
+    if (self.hp < 0) self.hp = 0;
+  }
+};
+
+/* exploding bullet behavior:
+   - any bullet with exploding:true will spawn shrapnel when removed (life ends or hit)
+*/
+
+function updateBullets(dt){
+  for (let i=bullets.length-1;i>=0;i--){
+    const b = bullets[i];
+
+    // movement
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+    b.life -= dt;
+
+    // remove if expired or offscreen
+    if (b.life <= 0 || b.x < -120 || b.x > W+120 || b.y < -120 || b.y > H+120){
+      // spawn shrapnel if exploding projectile
+      if (b.exploding && b.shrapnel){
+        for (let s=0;s<b.shrapnel;s++){
+          const a = Math.random()*Math.PI*2;
+          const speed = 140 + Math.random()*180;
+          spawnBullet(b.x, b.y, Math.cos(a)*speed, Math.sin(a)*speed, 'enemy', { r:5, dmg:8, life:2.4 });
+        }
+      }
+      bullets.splice(i,1);
+      continue;
+    }
+
+    if (b.owner === 'enemy'){
+      // collision with player
+      if (dist(b.x, b.y, player.x, player.y) < b.r + player.r){
+        player.hp -= b.dmg;
+        // exploding bullets spawn shrapnel on hit
+        if (b.exploding && b.shrapnel){
+          for (let s=0;s<b.shrapnel;s++){
+            const a = Math.random()*Math.PI*2;
+            const speed = 140 + Math.random()*160;
+            spawnBullet(b.x, b.y, Math.cos(a)*speed, Math.sin(a)*speed, 'enemy', { r:5, dmg:8, life:2.4 });
+          }
+        }
+        bullets.splice(i,1);
+        updateUI();
+        continue;
+      }
+    } else {
+      // player bullet hits boss core
+      if (dist(b.x, b.y, boss.x, boss.y) < b.r + 56){
+        boss.onHit(boss, b.dmg);
+        bullets.splice(i,1);
+        updateUI();
+        continue;
+      }
+      // sword/bullet can also hit exploding projectiles to prematurely detonate them (optional)
+      // If a player projectile strikes an exploding bullet, explode it immediately
+      for (let j=i-1;j>=0;j--){
+        const other = bullets[j];
+        if (other.owner === 'player' && other !== b){
+          if (dist(other.x, other.y, b.x, b.y) < other.r + b.r && b.exploding){
+            // detonate exploding projectile now
+            for (let s=0;s<b.shrapnel;s++){
+              const a = Math.random()*Math.PI*2;
+              const speed = 140 + Math.random()*160;
+              spawnBullet(b.x, b.y, Math.cos(a)*speed, Math.sin(a)*speed, 'enemy', { r:5, dmg:8, life:2.4 });
+            }
+            bullets.splice(i,1);
+            // consume the player's bullet too
+            bullets.splice(j,1);
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  // special: if core explosion is imminent and player inside the radius, flashing handled in boss.update/draw
+}
+
+/* Player input and update */
+function updatePlayer(dt){
+  let dx = (keys['arrowright'] || keys['d'] ? 1 : 0) - (keys['arrowleft'] || keys['a'] ? 1 : 0);
+  let dy = (keys['arrowdown'] || keys['s'] ? 1 : 0) - (keys['arrowup'] || keys['w'] ? 1 : 0);
+  const len = Math.hypot(dx,dy) || 1;
+  player.x += (dx/len) * player.speed * dt;
+  player.y += (dy/len) * player.speed * dt;
+  player.x = clamp(player.x, 20, W-20);
+  player.y = clamp(player.y, 120, H-20);
+
+  // toggle weapon on literal 'a' press (short press)
+  if (keys['a'] && !player._aLock){
+    player._aLock = true;
+    player.weapon = (player.weapon === 'gun') ? 'sword' : 'gun';
+    document.getElementById('weaponInfo') && (document.getElementById('weaponInfo').innerHTML = player.weapon === 'gun' ? '<span class="kbd">GUN</span> — Space to fire' : '<span class="kbd">SWORD</span> — Space to swing');
+  }
+  if (!keys['a']) player._aLock = false;
+
+  // shooting
+  shootTimer -= dt;
+  player.swordCooldown -= dt;
+  const space = keys[' '] || keys['space'];
+  if (player.weapon === 'gun'){
+    if (space && shootTimer <= 0){
+      shootTimer = player.shootCooldown;
+      spawnBullet(player.x, player.y-14, 0, -520, 'player', { r:4, dmg:12, life:1.0 });
+      spawnBullet(player.x-8, player.y-10, -80, -420, 'player', { r:3, dmg:8, life:1.0 });
+      spawnBullet(player.x+8, player.y-10, 80, -420, 'player', { r:3, dmg:8, life:1.0 });
+    }
+  } else {
+    if (space && player.swordCooldown <= 0){
+      player.swordCooldown = 0.45;
+      player.swordActiveUntil = performance.now()/1000 + player.swordSwingTime;
+      performSwordHit();
+    }
+  }
+}
+
+/* Sword swing: clears nearby shrapnel and can prematurely detonate exploding projectiles */
+function performSwordHit(){
+  const swingRadius = 72;
+  const swingArc = Math.PI * 0.9;
+  const aim = angleBetween(player, boss);
+  // damage core if in arc
+  const aToBoss = Math.atan2(boss.y - player.y, boss.x - player.x);
+  let delta = Math.abs(((aToBoss - aim + Math.PI) % (Math.PI*2)) - Math.PI);
+  const d = Math.hypot(boss.x - player.x, boss.y - player.y);
+  if (delta <= swingArc/2 && d <= swingRadius + 56){
+    boss.onHit(boss, 30);
+    updateUI();
+  }
+  // clear or detonate nearby enemy projectiles
+  for (let i = bullets.length-1; i >= 0; i--){
+    const b = bullets[i];
+    if (b.owner === 'enemy'){
+      const aToB = Math.atan2(b.y - player.y, b.x - player.x);
+      let dd = Math.abs(((aToB - aim + Math.PI) % (Math.PI*2)) - Math.PI);
+      const distPB = Math.hypot(b.x - player.x, b.y - player.y);
+      if (dd <= swingArc/2 && distPB <= swingRadius + b.r){
+        if (b.exploding){
+          // detonate immediately into shrapnel
+          for (let s=0;s<b.shrapnel;s++){
+            const a = Math.random()*Math.PI*2;
+            const speed = 140 + Math.random()*160;
+            spawnBullet(b.x, b.y, Math.cos(a)*speed, Math.sin(a)*speed, 'enemy', { r:5, dmg:8, life:2.4 });
+          }
+        }
+        bullets.splice(i,1);
+      }
+    }
+  }
+}
+
+/* render */
+function render(){
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle = '#051726'; ctx.fillRect(0,0,W,H);
+
+  // header
+  ctx.fillStyle = '#dff7ff'; ctx.font = '18px system-ui';
+  ctx.fillText(`Super Core Meltdown`, 12, 26);
+
+  // draw boss (telegraphs inside)
+  SuperCore.draw(SuperCore, ctx);
+
+  // draw bullets
+  for (const b of bullets){
+    ctx.beginPath();
+    if (b.owner === 'player'){ ctx.fillStyle = '#9be7ff'; ctx.arc(b.x,b.y,b.r,0,Math.PI*2); ctx.fill(); }
+    else {
+      if (b.exploding){ ctx.fillStyle = '#ffb86b'; ctx.beginPath(); ctx.arc(b.x,b.y,b.r,0,Math.PI*2); ctx.fill(); }
+      else { ctx.fillStyle = '#ff9b71'; ctx.arc(b.x,b.y,b.r,0,Math.PI*2); ctx.fill(); }
+    }
+  }
+
+  // player
+  ctx.save(); ctx.translate(player.x, player.y);
+  ctx.fillStyle = '#7cf2a3'; ctx.beginPath(); ctx.arc(0,0,player.r,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#0f2030'; ctx.beginPath(); ctx.arc(0, -4, 6, 0, Math.PI*2); ctx.fill();
+  ctx.restore();
+
+  // sword visual
+  const now = performance.now()/1000;
+  if (player.weapon === 'sword' && player.swordActiveUntil > now){
+    const aim = angleBetween(player, boss);
+    const swingRadius = 72;
+    ctx.save(); ctx.translate(player.x, player.y);
+    ctx.fillStyle = 'rgba(255,230,180,0.18)';
+    ctx.beginPath();
+    const start = aim - Math.PI*0.45, end = aim + Math.PI*0.45;
+    ctx.moveTo(0,0); ctx.arc(0,0,swingRadius,start,end); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+
+  // HUD
+  ctx.fillStyle = '#fff'; ctx.font = '13px system-ui';
+  ctx.fillText(`HP ${Math.max(0,player.hp|0)} / ${player.maxHp}`, 12, H-12);
+  ctx.fillText(`Boss HP ${Math.max(0,SuperCore.hp|0)} / ${SuperCore.maxHp}`, W-260, 28);
+}
+
+/* UI updates */
+function updateUI(){
+  document.getElementById('playerHP').style.width = `${Math.max(0, player.hp)/player.maxHp*100}%`;
+  document.getElementById('bossHP').style.width = `${Math.max(0, SuperCore.hp)/SuperCore.maxHp*100}%`;
+}
+
+/* main loop */
+function loop(time){
+  const dt = Math.min((time - (lastTime||time))/1000, 0.033);
+  lastTime = time;
+  updatePlayer(dt);
+  SuperCore.update(SuperCore, dt);
+  updateBullets(dt);
+
+  // check end conditions
+  if (SuperCore.hp <= 0){
+    ctx.clearRect(0,0,W,H);
+    ctx.fillStyle = '#041822'; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle = '#fff'; ctx.font = '28px system-ui'; ctx.fillText('BOSS DEFEATED', W/2-110, H/2);
+    return;
+  }
+  if (player.hp <= 0){
+    ctx.clearRect(0,0,W,H);
+    ctx.fillStyle = '#041822'; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle = '#fff'; ctx.font = '28px system-ui'; ctx.fillText('YOU DIED', W/2-60, H/2);
+    return;
+  }
+
+  render();
+  requestAnimationFrame(loop);
+}
+
+/* restart button */
+document.getElementById('restart').addEventListener('click', ()=> startGame());
+
+/* start */
+function startGame(){
+  player = createPlayer();
+  bullets = [];
+  SuperCore.enter(SuperCore);
+  lastTime = performance.now();
+  shootTimer = 0;
+  updateUI();
+  requestAnimationFrame(loop);
+}
+
+startGame();
+</script>
+</body>
+</html>

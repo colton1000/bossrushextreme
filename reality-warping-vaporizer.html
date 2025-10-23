@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Reality Warping Vaporizer</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  :root{--bg:#071322;--fg:#e9f7ff;--muted:#89a3b3;--accent:#7be7ff}
+  html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial}
+  #wrap{display:flex;gap:12px;padding:12px}
+  canvas{background:linear-gradient(180deg,#04121a 0%, #071b26 100%);border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,.6)}
+  #ui{width:320px}
+  .panel{background:rgba(255,255,255,0.02);padding:12px;border-radius:8px;margin-bottom:12px}
+  .bar{height:12px;background:rgba(255,255,255,0.04);border-radius:8px;overflow:hidden}
+  .bar > i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),#9bffa8)}
+  .muted{color:var(--muted);font-size:13px}
+  button{padding:8px 12px;border-radius:8px;background:#072b38;border:1px solid rgba(255,255,255,0.03);color:var(--fg);cursor:pointer}
+  .kbd{display:inline-block;padding:4px 8px;border-radius:6px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.03);font-family:monospace}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="c" width="980" height="540"></canvas>
+  <div id="ui">
+    <div class="panel">
+      <h3>Reality Warping Vaporizer</h3>
+      <div class="muted" id="roundInfo">Boss Demo</div>
+      <div style="height:8px"></div>
+      <div class="muted">Player Health</div>
+      <div class="bar" style="margin-top:6px"><i id="playerHP" style="width:100%"></i></div>
+      <div style="height:8px"></div>
+      <div class="muted">Boss Health</div>
+      <div class="bar" style="margin-top:6px"><i id="bossHP" style="width:100%"></i></div>
+    </div>
+
+    <div class="panel">
+      <div class="muted">Controls</div>
+      <div style="height:8px"></div>
+      <div class="muted">Move: Arrow keys or WASD</div>
+      <div class="muted">Shoot / Attack: Space</div>
+      <div class="muted">Switch Weapon: <span class="kbd">A</span></div>
+      <div style="height:8px"></div>
+      <button id="restart">Restart</button>
+    </div>
+
+    <div class="panel">
+      <div class="muted">Boss notes</div>
+      <ul class="muted">
+        <li>Every 6s fires homing bullets (moderate speed).</li>
+        <li>Every 8s has 78% chance to telegraph and then fire 3 big lasers (telegraph shows popup lines).</li>
+        <li>Super attack: 10 slower homing bullets (high damage) fired once when HP drops below 35%.</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<script>
+// Reality Warping Vaporizer - single-boss demo
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+let keys = {};
+addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
+addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+
+function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+function rand(min,max){ return Math.random()*(max-min)+min; }
+function angleBetween(a,b){ return Math.atan2(b.y-a.y, b.x-a.x); }
+
+let player, boss, bullets, lastTime, shootTimer;
+bullets = [];
+
+// Player
+function createPlayer(){
+  return {
+    x: W/2, y: H-90, r:12,
+    speed: 260, hp: 120, maxHp:120,
+    weapon:'gun', shootCooldown:0.16, swordCooldown:0, swordActiveUntil:0, swordSwingTime:0.22, _aLock:false
+  };
+}
+
+function spawnBullet(x,y,vx,vy, owner='enemy', opts={}){
+  bullets.push(Object.assign({x,y,vx,vy,r:opts.r||5,owner,dmg:opts.dmg||10,life:opts.life||5}, opts));
+}
+
+// Boss object
+const RealityVaporizer = {
+  name: "Reality Warping Vaporizer",
+  maxHp: 1200,
+  enter(self){
+    self.hp = self.maxHp;
+    self.x = W/2; self.y = 140;
+    self.timer = 0;
+    self.homingTimer = 6.0;     // every 6s fire homing bullets
+    self.laserTimer = 8.0;      // every 8s check 78% chance to telegraph & fire 3 lasers
+    self.superReady = true;     // super triggers once below threshold
+    self.superThreshold = 0.35; // 35% HP
+    self.superActive = false;
+    self.telegraphs = [];       // active laser telegraphs {x1,y1,x2,y2,t}
+    self.homingCount = 4;       // homing bullets per homing volley
+    self.laserWarningTime = 1.0; // seconds telegraph visible before lasers fire
+  },
+
+  update(self,dt){
+    self.timer += dt;
+
+    // Homing volley every 6 seconds
+    self.homingTimer -= dt;
+    if (self.homingTimer <= 0){
+      self.homingTimer = 6.0;
+      // spawn several homing bullets (moderate speed)
+      for (let i=0;i<self.homingCount;i++){
+        const ang = Math.atan2(player.y - self.y, player.x - self.x) + rand(-0.35,0.35);
+        spawnBullet(self.x + Math.cos(ang)*24, self.y + Math.sin(ang)*24, Math.cos(ang)*160 + rand(-12,12), Math.sin(ang)*160 + rand(-12,12), 'enemy', {r:7, dmg:12, life:6, homing:true});
+      }
+    }
+
+    // Laser check every 8 seconds (78% chance)
+    self.laserTimer -= dt;
+    if (self.laserTimer <= 0){
+      self.laserTimer = 8.0;
+      if (Math.random() < 0.78){
+        // Choose three aim positions (spread around the player) and add telegraphs
+        for (let i=0;i<3;i++){
+          const offset = (i-1)*40 + rand(-18,18);
+          const aimX = clamp(player.x + offset, 80, W-80);
+          const aimY = clamp(player.y + rand(-28,28), 120, H-80);
+          // telegraph from boss to aim position
+          self.telegraphs.push({x1:self.x, y1:self.y, x2:aimX, y2:aimY, t:self.laserWarningTime});
+        }
+      }
+    }
+
+    // process telegraphs: count down warning time then fire lasers
+    for (let i=self.telegraphs.length-1;i>=0;i--){
+      const tg = self.telegraphs[i];
+      tg.t -= dt;
+      if (tg.t <= 0){
+        // fire a big laser shot along the telegraph line
+        const ang = Math.atan2(tg.y2 - tg.y1, tg.x2 - tg.x1);
+        // lasers are fast, large, and pierce a short distance; implemented as a fast bullet with long life and large radius
+        spawnBullet(tg.x1 + Math.cos(ang)*32, tg.y1 + Math.sin(ang)*32, Math.cos(ang)*520, Math.sin(ang)*520, 'enemy', {r:14, dmg:36, life:1.1, laser:true});
+        // small secondary pulses along beam
+        for (let p=0;p<3;p++){
+          spawnBullet(tg.x2 + rand(-6,6), tg.y2 + rand(-6,6), rand(-20,20), rand(-20,20), 'enemy', {r:6, dmg:12, life:0.9});
+        }
+        self.telegraphs.splice(i,1);
+      }
+    }
+
+    // Super attack: when below threshold, trigger once: 10 slower homing bullets
+    if (self.superReady && self.hp <= self.maxHp * self.superThreshold){
+      self.superReady = false;
+      self.superActive = true;
+      // create 10 homing bullets that are slower but very damaging
+      for (let i=0;i<10;i++){
+        const ang = Math.atan2(player.y - self.y, player.x - self.x) + rand(-0.8,0.8);
+        spawnBullet(self.x + Math.cos(ang)*28, self.y + Math.sin(ang)*28, Math.cos(ang)*80 + rand(-8,8), Math.sin(ang)*80 + rand(-8,8), 'enemy', {r:9, dmg:34, life:9, homing:true, slowHoming:true});
+      }
+      // super lasts only as the volley; mark active briefly for visuals
+      setTimeout(()=>{ self.superActive = false; }, 1500);
+    }
+
+    // optional: add small idle wandering or pulsing; can animate in draw()
+  },
+
+  draw(self,ctx){
+    // core
+    ctx.save(); ctx.translate(self.x,self.y);
+    // pulsating core
+    const pulse = 4*Math.sin(performance.now()/300);
+    ctx.fillStyle = '#a5ffdf';
+    ctx.beginPath(); ctx.arc(0,0,46 + pulse,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#052a2a'; ctx.font='12px system-ui'; ctx.fillText('Reality Vaporizer', -48, 64);
+    ctx.restore();
+
+    // draw telegraphs (warning lines)
+    for (const tg of self.telegraphs){
+      const alpha = Math.max(0, Math.min(1, tg.t / 1.0));
+      ctx.strokeStyle = `rgba(180,255,235,${0.6*alpha})`;
+      ctx.lineWidth = 3 + 8*alpha;
+      ctx.beginPath();
+      ctx.moveTo(tg.x1, tg.y1);
+      ctx.lineTo(tg.x2, tg.y2);
+      ctx.stroke();
+      // popup marker at aim
+      ctx.fillStyle = `rgba(255,120,120,${0.6*alpha})`;
+      ctx.beginPath(); ctx.arc(tg.x2, tg.y2, 10 + 8*(1-alpha), 0, Math.PI*2); ctx.fill();
+    }
+
+    // super active indicator
+    if (self.superActive){
+      ctx.fillStyle = 'rgba(255,200,80,0.12)';
+      ctx.beginPath(); ctx.arc(self.x, self.y, 120, 0, Math.PI*2); ctx.fill();
+    }
+  },
+
+  onHit(self,dmg){
+    // take damage normally
+    self.hp -= dmg;
+    if (self.hp < 0) self.hp = 0;
+  }
+};
+
+// simple homing logic applied each frame for bullets with homing:true
+function updateBullets(dt){
+  for (let i=bullets.length-1;i>=0;i--){
+    const b = bullets[i];
+    // homing behavior
+    if (b.homing && typeof player !== 'undefined' && player){
+      // choose homing strength (slower homing for special slowHoming)
+      const strength = b.slowHoming ? 300 : 500;
+      const ang = Math.atan2(player.y - b.y, player.x - b.x);
+      b.vx += Math.cos(ang) * strength * dt;
+      b.vy += Math.sin(ang) * strength * dt;
+      // cap speed
+      const sp = Math.hypot(b.vx, b.vy);
+      const maxSp = b.slowHoming ? 160 : 360;
+      if (sp > maxSp){ b.vx *= maxSp/sp; b.vy *= maxSp/sp; }
+    }
+
+    // move
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+    b.life -= dt;
+
+    // remove offscreen/expired
+    if (b.life <= 0 || b.x < -120 || b.x > W+120 || b.y < -120 || b.y > H+120){
+      bullets.splice(i,1);
+      continue;
+    }
+
+    // collisions
+    if (b.owner === 'enemy'){
+      // hit player
+      const d = Math.hypot(b.x - player.x, b.y - player.y);
+      if (d < b.r + player.r){
+        player.hp -= b.dmg;
+        bullets.splice(i,1);
+        updateUI();
+        continue;
+      }
+    } else {
+      // player projectile hits boss core
+      const d = Math.hypot(b.x - boss.x, b.y - boss.y);
+      if (d < b.r + 46){
+        boss.onHit(boss, b.dmg);
+        bullets.splice(i,1);
+        updateUI();
+        continue;
+      }
+    }
+  }
+}
+
+// player update and input
+function updatePlayer(dt){
+  let dx = (keys['arrowright']||keys['d']?1:0) - (keys['arrowleft']||keys['a']?1:0);
+  let dy = (keys['arrowdown']||keys['s']?1:0) - (keys['arrowup']||keys['w']?1:0);
+  const len = Math.hypot(dx,dy) || 1;
+  player.x += (dx/len) * player.speed * dt;
+  player.y += (dy/len) * player.speed * dt;
+  player.x = clamp(player.x, 20, W-20);
+  player.y = clamp(player.y, 110, H-20);
+
+  // toggle weapon on literal 'a' (short press)
+  if (keys['a'] && !player._aLock){ player._aLock = true; player.weapon = (player.weapon==='gun')?'sword':'gun'; }
+  if (!keys['a']) player._aLock = false;
+
+  // shooting
+  shootTimer -= dt;
+  player.swordCooldown -= dt;
+  const space = keys[' '] || keys['space'];
+  if (player.weapon === 'gun'){
+    if (space && shootTimer <= 0){
+      shootTimer = player.shootCooldown;
+      spawnBullet(player.x, player.y-14, 0, -420, 'player', {r:4, dmg:12, life:1.2});
+      spawnBullet(player.x-8, player.y-10, -60, -360, 'player', {r:3, dmg:8, life:1.2});
+      spawnBullet(player.x+8, player.y-10, 60, -360, 'player', {r:3, dmg:8, life:1.2});
+    }
+  } else {
+    if (space && player.swordCooldown <= 0){
+      player.swordCooldown = 0.45;
+      player.swordActiveUntil = performance.now()/1000 + player.swordSwingTime;
+      performSwordHit();
+    }
+  }
+}
+
+// sword: damage core if in arc
+function performSwordHit(){
+  const swingRadius = 72;
+  const swingArc = Math.PI*0.9;
+  const aim = angleBetween(player, boss);
+  const aToBoss = Math.atan2(boss.y - player.y, boss.x - player.x);
+  let delta = Math.abs(((aToBoss - aim + Math.PI) % (Math.PI*2)) - Math.PI);
+  const d = Math.hypot(boss.x - player.x, boss.y - player.y);
+  if (delta <= swingArc/2 && d <= swingRadius + 46){
+    boss.onHit(boss, 28);
+    updateUI();
+  }
+  // destroy close enemy bullets with sword
+  for (let i=bullets.length-1;i>=0;i--){
+    const b = bullets[i];
+    if (b.owner==='enemy'){
+      const aToB = Math.atan2(b.y - player.y, b.x - player.x);
+      let dd = Math.abs(((aToB - aim + Math.PI) % (Math.PI*2)) - Math.PI);
+      const distPB = Math.hypot(b.x - player.x, b.y - player.y);
+      if (dd <= swingArc/2 && distPB <= swingRadius + b.r){
+        bullets.splice(i,1);
+      }
+    }
+  }
+}
+
+// render
+function render(){
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle = '#041822'; ctx.fillRect(0,0,W,H);
+
+  // header
+  ctx.fillStyle = '#dff7ff'; ctx.font = '18px system-ui'; ctx.fillText(`${RealityVaporizer.name}`, 12, 26);
+
+  // draw telegraph under boss to ensure visibility
+  if (boss && boss.telegraphs){
+    // telegraph rendering is handled in boss.draw
+  }
+
+  // draw boss
+  if (boss && boss.draw) boss.draw(boss, ctx);
+
+  // bullets
+  for (const b of bullets){
+    ctx.beginPath();
+    if (b.owner === 'player'){ ctx.fillStyle = '#9be7ff'; ctx.arc(b.x,b.y,b.r,0,Math.PI*2); ctx.fill(); }
+    else {
+      if (b.laser) { ctx.fillStyle = '#ffd06b'; ctx.beginPath(); ctx.rect(b.x- b.r/2, b.y - b.r/2, b.r, b.r); ctx.fill(); }
+      else ctx.fillStyle = '#ff9bdb', ctx.beginPath(), ctx.arc(b.x,b.y,b.r,0,Math.PI*2), ctx.fill();
+    }
+  }
+
+  // player
+  ctx.save(); ctx.translate(player.x, player.y);
+  ctx.fillStyle = '#7cf2a3'; ctx.beginPath(); ctx.arc(0,0,player.r,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#0f2030'; ctx.beginPath(); ctx.arc(0,-4,6,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+
+  // sword visual
+  const now = performance.now()/1000;
+  if (player.weapon === 'sword' && player.swordActiveUntil > now){
+    const aim = angleBetween(player, boss);
+    const swingRadius = 72;
+    ctx.save(); ctx.translate(player.x, player.y);
+    ctx.fillStyle = 'rgba(255,230,180,0.18)';
+    ctx.beginPath();
+    const start = aim - Math.PI*0.45, end = aim + Math.PI*0.45;
+    ctx.moveTo(0,0); ctx.arc(0,0,swingRadius,start,end); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+
+  // HUD
+  ctx.fillStyle = '#fff'; ctx.font = '13px system-ui';
+  ctx.fillText(`HP ${Math.max(0,player.hp|0)} / ${player.maxHp}`, 12, H-12);
+  ctx.fillText(`Boss HP ${Math.max(0,boss.hp|0)} / ${boss.maxHp}`, W-260, 28);
+}
+
+// UI update
+function updateUI(){
+  document.getElementById('playerHP').style.width = `${Math.max(0, player.hp)/player.maxHp*100}%`;
+  document.getElementById('bossHP').style.width = `${Math.max(0, boss.hp)/boss.maxHp*100}%`;
+}
+
+// main loop
+function loop(time){
+  const dt = Math.min((time - (lastTime||time))/1000, 0.033);
+  lastTime = time;
+  updatePlayer(dt);
+  if (boss && boss.update) boss.update(boss, dt);
+  updateBullets(dt);
+
+  // check end conditions
+  if (boss && boss.hp <= 0){
+    ctx.clearRect(0,0,W,H);
+    ctx.fillStyle = '#041822'; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle = '#fff'; ctx.font='28px system-ui'; ctx.fillText('BOSS DEFEATED', W/2-110, H/2);
+    return;
+  }
+  if (player.hp <= 0){
+    ctx.clearRect(0,0,W,H);
+    ctx.fillStyle = '#041822'; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle = '#fff'; ctx.font='28px system-ui'; ctx.fillText('YOU DIED', W/2-60, H/2);
+    return;
+  }
+
+  render();
+  requestAnimationFrame(loop);
+}
+
+// restart
+document.getElementById('restart').addEventListener('click', ()=> startGame());
+
+// start
+function startGame(){
+  player = createPlayer();
+  bullets = [];
+  boss = Object.assign({}, RealityVaporizer);
+  boss.enter(boss);
+  lastTime = performance.now();
+  shootTimer = 0;
+  updateUI();
+  requestAnimationFrame(loop);
+}
+
+startGame();
+</script>
+</body>
+</html>
