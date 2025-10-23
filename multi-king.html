@@ -163,7 +163,7 @@ const MultiKing = {
       for (let i=0;i<18;i++){
         const ang = Math.atan2(player.y - self.y, player.x - self.x) + rand(-0.9,0.9);
         spawnBullet(self.x + Math.cos(ang)*28, self.y + Math.sin(ang)*28, Math.cos(ang)*140 + rand(-20,20), Math.sin(ang)*140 + rand(-20,20),
-                    'enemy', {r:9, dmg:26, life:6.8, exploding:true, shrapnel:8, _src:self._id});
+                    'enemy', {r:9, dmg:3, life:6.8, exploding:true, shrapnel:8, _src:self._id});
       }
     }
 
@@ -173,7 +173,7 @@ const MultiKing = {
       if (Math.random() < 0.85 * dt * 60){
         const ang = Math.atan2(player.y - self.y, player.x - self.x) + rand(-0.9,0.9);
         spawnBullet(self.x + Math.cos(ang)*28, self.y + Math.sin(ang)*28, Math.cos(ang)*160 + rand(-10,10), Math.sin(ang)*160 + rand(-10,10),
-                    'enemy', {r:9, dmg:28, life:7.6, exploding:true, shrapnel:8, _src:self._id});
+                    'enemy', {r:9, dmg:3, life:7.6, exploding:true, shrapnel:8, _src:self._id});
       }
       if (self.superTimer <= 0) self.superActive = false;
     }
@@ -422,4 +422,5 @@ startGame();
 </script>
 </body>
 </html>
+
 
